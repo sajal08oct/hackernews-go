@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -28,28 +29,10 @@ func main() {
 func handler(numStories int, tpl *template.Template) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		var client hn.Client
-		ids, err := client.GetTopStories()
+		stories, err := getTopStories(numStories)
 		if err != nil {
-			http.Error(w, "Failed to load top stories", http.StatusInternalServerError)
+			http.Error(w, "Failed to process the template ::"+err.Error(), http.StatusInternalServerError)
 			return
-		}
-		var stories []item
-
-		for _, id := range ids {
-			hnItem, err := client.GetItem(id)
-			if err != nil {
-				http.Error(w, "Failed to load top stories here", http.StatusInternalServerError)
-				continue
-			}
-
-			item := parseHNItem(hnItem)
-			if isStoryLink(item) {
-				stories = append(stories, item)
-				if len(stories) >= numStories {
-					break
-				}
-			}
 		}
 
 		data := templateData{
@@ -63,6 +46,55 @@ func handler(numStories int, tpl *template.Template) http.HandlerFunc {
 		}
 
 	})
+}
+
+func getTopStories(numStories int) ([]item, error) {
+	var client hn.Client
+	ids, err := client.GetTopStories()
+	if err != nil {
+		return nil, err
+	}
+	type result struct {
+		item  item
+		index int
+		err   error
+	}
+	resultCh := make(chan result)
+
+	for index, id := range ids {
+		go func(ind, id int) {
+			hnItem, err := client.GetItem(id)
+			if err != nil {
+				resultCh <- result{index: ind, err: err}
+			}
+			resultCh <- result{index: ind, item: parseHNItem(hnItem)}
+		}(index, id)
+	}
+	var results []result
+	counter := 0
+	for res := range resultCh {
+		counter++
+		if counter == len(ids) {
+			break
+		}
+		if isStoryLink(res.item) {
+			results = append(results, res)
+		}
+	}
+	fmt.Println("Got results")
+	sort.Slice(results, func(i int, j int) bool {
+		return results[i].index < results[j].index
+	})
+	var stories []item
+
+	for _, res := range results {
+		stories = append(stories, res.item)
+		if len(stories) >= numStories {
+			break
+		}
+	}
+
+	return stories, nil
 }
 
 type templateData struct {
